@@ -5,4 +5,5 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
     <AssemblyName>EditExcel</AssemblyName>
   </PropertyGroup>
+  <ItemGroup><PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" /></ItemGroup>
 </Project>

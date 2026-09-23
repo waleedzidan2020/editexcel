@@ -14,6 +14,26 @@ static byte[] Book(string value)
     return stream.ToArray();
 }
 var target = RepoFile.Parse("https://github.com/a/b/blob/main/data/test.xlsx", "main");
+var waits = new List<double>();
+using (var login = new DeviceLogin(new FakeLogin("authorization_pending", "slow_down", "success"), (time, ct) => { ct.ThrowIfCancellationRequested(); waits.Add(time.TotalSeconds); return Task.CompletedTask; }))
+{
+    var result = await login.SignIn("test-client", code => Assert(code == "ABCD-EFGH", "Visible user code"), CancellationToken.None);
+    Assert(result.Token == "test-access" && !result.Expired, "Login result and expiry");
+    Assert(waits.SequenceEqual(new double[] { 5, 5, 10 }), "Respect GitHub polling interval and slow_down");
+}
+using (var denied = new DeviceLogin(new FakeLogin("access_denied"), (_, _) => Task.CompletedTask))
+{
+    try { await denied.SignIn("test-client", _ => {}, CancellationToken.None); throw new Exception("Denied login accepted"); }
+    catch (InvalidOperationException ex) { Assert(ex.Message.Contains("رفض"), "Denied message"); }
+}
+using (var cancel = new CancellationTokenSource())
+using (var login = new DeviceLogin(new FakeLogin("success"), (_, ct) => { ct.ThrowIfCancellationRequested(); return Task.CompletedTask; }))
+{
+    try { await login.SignIn("test-client", _ => cancel.Cancel(), cancel.Token); throw new Exception("Cancellation ignored"); }
+    catch (OperationCanceledException) { }
+}
+Assert(new LoginCredential("test", DateTimeOffset.UtcNow.AddHours(-1), "id").Expired, "Expired credential");
+Console.WriteLine("PASS: device login, pending, slow_down, expiry, denial and cancellation.");
 Assert(target.Path == "data/test.xlsx", "Parse path");
 Assert(RepoFile.Parse("https://raw.githubusercontent.com/a/b/refs/heads/feature/test/data/a.xlsx", "feature/test").Path == "data/a.xlsx", "Slash branch");
 Assert(RepoFile.Parse("https://github.com/a/b/blob/main/%D9%85%D8%AF%D8%B1%D8%B3%D8%A9.xlsx", "main").Path == "مدرسة.xlsx", "Arabic path");
@@ -61,4 +81,16 @@ sealed class FakeGitHub(byte[] bytes) : HttpMessageHandler
         return Json(new { content = new { sha = WorkbookBytes.GitSha(Bytes) } });
     }
     static HttpResponseMessage Json(object data) => new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(data), Encoding.UTF8, "application/json") };
+}
+
+sealed class FakeLogin(params string[] responses) : HttpMessageHandler
+{
+    readonly Queue<string> sequence = new(responses);
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        object result;
+        if (request.RequestUri!.AbsolutePath.EndsWith("/device/code")) result = new { device_code = "private-device-code", user_code = "ABCD-EFGH", interval = 5, expires_in = 900 };
+        else { var next = sequence.Dequeue(); result = next == "success" ? (object)new { access_token = "test-access", expires_in = 28800 } : new { error = next }; }
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(result)) });
+    }
 }
